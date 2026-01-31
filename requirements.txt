@@ -1,0 +1,7 @@
+#this file lists external dependencies
+requests==2.31.0
+sqlalchemy
+nltkspacy
+openai
+oracledb
+transformers
