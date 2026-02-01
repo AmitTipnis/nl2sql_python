@@ -30,6 +30,7 @@ Limitations
 Usage
 -----
 Run directly to see demo examples:
+pip install -r requirements.txt
 python nl2sql.py
 
 Import and use:
