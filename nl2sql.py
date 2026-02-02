@@ -236,143 +236,127 @@ class NL2SQL:
 
 # --- detectors ---
 def _detect_tables(self, text: str) -> List[str]:
-
-
     tables = []
-for tname, meta in self.schema.tables.items():
-    patterns = [tname] + [pluralize(tname)] + meta.synonyms
-for p in patterns:
-    if re.search(rf"\b{re.escape(p)}\b", text):
-    tables.append(tname)
-break
-# de-dup
-return list(dict.fromkeys(tables))
+    for tname, meta in self.schema.tables.items():
+        patterns = [tname] + [pluralize(tname)] + meta.synonyms
+        for p in patterns:
+            if re.search(rf"\b{re.escape(p)}\b", text):
+                tables.append(tname)
+                break
+        # de-dup
+    return list(dict.fromkeys(tables))
 
 
 def _detect_agg(self, text: str) -> Optional[Tuple[str, Optional[str]]]:
-
-
-# find keyword
-for phrase, agg in AGG_KEYWORDS.items():
-    if phrase in text:
-# if a column follows the agg
-col = self._find_any_column(text)
-# for COUNT default to *
-return (agg, None if agg == "COUNT" else col)
-# handle "how many X" → COUNT(*)
-if re.search(r"\bhow many\b|\bnumber of\b", text):
-    return ("COUNT", None)
-return None
+    # find keyword
+    for phrase, agg in AGG_KEYWORDS.items():
+        if phrase in text:
+        # if a column follows the agg
+            col = self._find_any_column(text)
+            # for COUNT default to *
+        return (agg, None if agg == "COUNT" else col)
+    # handle "how many X" → COUNT(*)
+    if re.search(r"\bhow many\b|\bnumber of\b", text):
+        return ("COUNT", None)
+    return None
 
 
 def _detect_columns(self, text: str, tables: List[str]) -> List[str]:
-
-
     cols_found = set()
-# direct mention of columns or synonyms
-for t in tables:
-    cols = self.schema.tables[t].columns
-for c in cols:
-    if re.search(rf"\b{re.escape(c)}\b", text):
-    cols_found.add(f"{t}.{c}" if len(tables) > 1 else c)
-else:
-for syn in self.schema.column_synonyms.get(c, []):
-    if re.search(rf"\b{re.escape(syn)}\b", text):
-    cols_found.add(f"{t}.{c}" if len(tables) > 1 else c)
-# fallback: if "list/show/get" with no specific agg, default to *
-return sorted(cols_found)
+    # direct mention of columns or synonyms
+    for t in tables:
+        cols = self.schema.tables[t].columns
+        for c in cols:
+            if re.search(rf"\b{re.escape(c)}\b", text):
+                 cols_found.add(f"{t}.{c}" if len(tables) > 1 else c)
+            else:
+                for syn in self.schema.column_synonyms.get(c, []):
+                    if re.search(rf"\b{re.escape(syn)}\b", text):
+                        cols_found.add(f"{t}.{c}" if len(tables) > 1 else c)
+    # fallback: if "list/show/get" with no specific agg, default to *
+    return sorted(cols_found)
 
 
 def _find_any_column(self, text: str) -> Optional[str]:
-
-
     for t, meta in self.schema.tables.items():
-    for c in meta.columns:
-    if re.search(rf"\b{re.escape(c)}\b", text):
-    return c
-for syn in self.schema.column_synonyms.get(c, []):
-    if re.search(rf"\b{re.escape(syn)}\b", text):
-    return c
-return None
+        for c in meta.columns:
+            if re.search(rf"\b{re.escape(c)}\b", text):
+                return c
+    for syn in self.schema.column_synonyms.get(c, []):
+        if re.search(rf"\b{re.escape(syn)}\b", text):
+            return c
+    return None
 
 
 def _detect_joins(self, tables: List[str]) -> List[Tuple[str, str, str, str]]:
-
-
     joins = []
-if len(tables) <= 1:
+    if len(tables) <= 1:
+        return joins
+    #try to chain tables via known FKs
+    used = set([tables[0]])
+    for t in tables[1:]:
+        link = None
+        for fk in self.schema.fks:
+            if (fk.left_table in used and fk.right_table == t) or (fk.right_table in used and fk.left_table == t):
+                link = fk
+                break
+        if link:
+            if link.left_table in used:
+                joins.append((link.left_table, link.left_col, link.right_table, link.right_col))
+                used.add(link.right_table)
+            else:
+                joins.append((link.right_table, link.right_col, link.left_table, link.left_col))
+                used.add(link.left_table)
     return joins
-# try to chain tables via known FKs
-used = set([tables[0]])
-for t in tables[1:]:
-    link = None
-for fk in self.schema.fks:
-    if (fk.left_table in used and fk.right_table == t) or (fk.right_table in used and fk.left_table == t):
-    link = fk
-break
-if link:
-    if link.left_table in used:
-    joins.append((link.left_table, link.left_col, link.right_table, link.right_col))
-used.add(link.right_table)
-else:
-joins.append((link.right_table, link.right_col, link.left_table, link.left_col))
-used.add(link.left_table)
-return joins
 
 
 def _detect_equality_filters(self, text: str, tables: List[str]) -> List[str]:
-
-
     filters = []
-# pattern: "status open", "city mumbai", "name like 'john'"
-for t in tables:
-    for c in self.schema.tables[t].columns:
-# equals via "c = value" or "c is value" or "c value"
-# capture quoted strings first
-pattern = rf"(?:\b{re.escape(c)}\b|\b{'|'.join(map(re.escape, self.schema.column_synonyms.get(c, [])))}\b)\s*(?:=|is|equal to|equals)?\s*'([^']+)'"
-for m in re.finditer(pattern, text):
-    val = m.group(1)
-col = f"{t}.{c}" if len(tables) > 1 else c
-filters.append(f"{col} = '{val}'")
-# unquoted single token
-pattern2 = rf"(?:\b{re.escape(c)}\b|\b{'|'.join(map(re.escape, self.schema.column_synonyms.get(c, [])))}\b)\s*(?:=|is|equal to|equals)?\s*\b([a-z0-9_%-]+)\b"
-for m in re.finditer(pattern2, text):
-    val = m.group(1)
-if val in {'greater', 'less', 'over', 'under', 'before', 'after', 'between', 'on', 'latest', 'highest', 'lowest', 'top',
-           'bottom'}:
-    continue
-col = f"{t}.{c}" if len(tables) > 1 else c
-# don't duplicate date/number comparisons handled elsewhere
-if not re.match(r"^\d{4}-\d{2}-\d{2}$", val):
-    filters.append(f"{col} = '{val}'")
-return list(dict.fromkeys(filters))
+    # pattern: "status open", "city mumbai", "name like 'john'"
+    for t in tables:
+     for c in self.schema.tables[t].columns:
+    # equals via "c = value" or "c is value" or "c value"
+    # capture quoted strings first
+    pattern = rf"(?:\b{re.escape(c)}\b|\b{'|'.join(map(re.escape, self.schema.column_synonyms.get(c, [])))}\b)\s*(?:=|is|equal to|equals)?\s*'([^']+)'"
+    for m in re.finditer(pattern, text):
+        val = m.group(1)
+        col = f"{t}.{c}" if len(tables) > 1 else c
+        filters.append(f"{col} = '{val}'")
+        # unquoted single token
+        pattern2 = rf"(?:\b{re.escape(c)}\b|\b{'|'.join(map(re.escape, self.schema.column_synonyms.get(c, [])))}\b)\s*(?:=|is|equal to|equals)?\s*\b([a-z0-9_%-]+)\b"
+        for m in re.finditer(pattern2, text):
+            val = m.group(1)
+            if val in {'greater', 'less', 'over', 'under', 'before', 'after', 'between', 'on', 'latest', 'highest', 'lowest', 'top',
+                'bottom'}:
+                continue
+            col = f"{t}.{c}" if len(tables) > 1 else c
+        # don't duplicate date/number comparisons handled elsewhere
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", val):
+            filters.append(f"{col} = '{val}'")
+    return list(dict.fromkeys(filters))
 
 
 def _detect_comparison_filters(self, text: str, tables: List[str]) -> List[str]:
-
-
     filters = []
-# comparators like "amount > 100", "price at least 50"
-for phrase, op in COMPARATORS.items():
-    if phrase in text:
-# find nearest number and column
-num = self._nearest_number(text, phrase)
-col = self._nearest_column(text, phrase, tables)
-if num is not None and col is not None:
-    filters.append(f"{col} {op} {num}")
-# direct "amount > 100"
-m = re.finditer(r"\b([a-z_][a-z0-9_]*)\s*(>=|<=|>|<|=)\s*(\d+(?:\.\d+)?)", text)
-for g in m:
-    col, op, num = g.groups()
-col_full = self._qualify_column(col, tables)
-if col_full:
-    filters.append(f"{col_full} {op} {num}")
-return list(dict.fromkeys(filters))
+    # comparators like "amount > 100", "price at least 50"
+    for phrase, op in COMPARATORS.items():
+        if phrase in text:
+        # find nearest number and column
+        num = self._nearest_number(text, phrase)
+        col = self._nearest_column(text, phrase, tables)
+        if num is not None and col is not None:
+            filters.append(f"{col} {op} {num}")
+            # direct "amount > 100"
+            m = re.finditer(r"\b([a-z_][a-z0-9_]*)\s*(>=|<=|>|<|=)\s*(\d+(?:\.\d+)?)", text)
+            for g in m:
+                col, op, num = g.groups()
+                col_full = self._qualify_column(col, tables)
+                if col_full:
+                   filters.append(f"{col_full} {op} {num}")
+        return list(dict.fromkeys(filters))
 
 
 def _detect_like_filters(self, text: str, tables: List[str]) -> List[str]:
-
-
     filters = []
 # "containing/contains/like 'john' in name"
 like_match = re.search(r"(containing|contains|like)\s+'([^']+)'(?:\s+in\s+([a-z_][a-z0-9_]*))?", text)
